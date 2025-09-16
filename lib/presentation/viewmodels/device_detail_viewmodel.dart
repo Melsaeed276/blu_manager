@@ -1,4 +1,3 @@
-import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../domain/entities/bluetooth_device_entity.dart';
 import '../../domain/entities/file_transfer_entity.dart';
@@ -46,24 +45,17 @@ class DeviceDetailState {
   bool get isConnected => connectionState == BluetoothConnectionState.connected;
 }
 
-// Controller to manage device detail state
-class DeviceDetailController extends StateNotifier<DeviceDetailState> {
-  DeviceDetailController(this.ref, BluetoothDeviceEntity device)
-      : super(DeviceDetailState(device: device));
-
+// Controller class for managing device details
+class DeviceDetailController {
   final Ref ref;
+  final BluetoothDeviceEntity device;
 
-  void clearMessages() {
-    state = state.copyWith(
-      errorMessage: null,
-      successMessage: null,
-    );
-  }
+  DeviceDetailController(this.ref, this.device);
 
-  Future<void> connectToDevice() async {
-    if (state.isConnecting || state.isConnected) return;
+  Future<DeviceDetailState> connectToDevice(DeviceDetailState currentState) async {
+    if (currentState.isConnecting || currentState.isConnected) return currentState;
 
-    state = state.copyWith(
+    var newState = currentState.copyWith(
       isConnecting: true,
       errorMessage: null,
     );
@@ -71,107 +63,104 @@ class DeviceDetailController extends StateNotifier<DeviceDetailState> {
     try {
       final connectUseCase = ref.read(connectToDeviceProvider);
       final result = await connectUseCase.call(ConnectToDeviceParams(
-        device: state.device,
+        deviceId: device.id,
       ));
 
-      if (result.isSuccess) {
-        state = state.copyWith(
+      if (result) {
+        newState = newState.copyWith(
           connectionState: BluetoothConnectionState.connected,
           isConnecting: false,
           successMessage: 'Connected successfully',
         );
       } else {
-        state = state.copyWith(
+        newState = newState.copyWith(
           isConnecting: false,
           errorMessage: 'Failed to connect to device',
         );
       }
     } catch (e) {
-      state = state.copyWith(
+      newState = newState.copyWith(
         isConnecting: false,
         errorMessage: 'Connection failed: ${e.toString()}',
       );
     }
+
+    return newState;
   }
 
-  Future<void> disconnectFromDevice() async {
-    if (!state.isConnected) return;
+  Future<DeviceDetailState> disconnectFromDevice(DeviceDetailState currentState) async {
+    if (!currentState.isConnected) return currentState;
 
     try {
       final disconnectUseCase = ref.read(disconnectFromDeviceProvider);
-      final result = await disconnectUseCase.call(DisconnectFromDeviceParams(
-        device: state.device,
+      await disconnectUseCase.call(DisconnectFromDeviceParams(
+        deviceId: device.id,
       ));
 
-      if (result.isSuccess) {
-        state = state.copyWith(
-          connectionState: BluetoothConnectionState.disconnected,
-          successMessage: 'Disconnected successfully',
-        );
-      } else {
-        state = state.copyWith(
-          errorMessage: 'Failed to disconnect from device',
-        );
-      }
+      return currentState.copyWith(
+        connectionState: BluetoothConnectionState.disconnected,
+        successMessage: 'Disconnected successfully',
+      );
     } catch (e) {
-      state = state.copyWith(
+      return currentState.copyWith(
         errorMessage: 'Disconnection failed: ${e.toString()}',
       );
     }
   }
 
-  Future<void> sendFile() async {
-    if (!state.isConnected) {
-      state = state.copyWith(
+  Future<DeviceDetailState> sendFile(DeviceDetailState currentState) async {
+    if (!currentState.isConnected) {
+      return currentState.copyWith(
         errorMessage: 'Device is not connected',
       );
-      return;
     }
 
     try {
       // Pick file
       final pickFileUseCase = ref.read(pickFileProvider);
-      final fileResult = await pickFileUseCase.call(const NoParams());
+      final filePath = await pickFileUseCase.call(const NoParams());
 
-      if (fileResult.isSuccess && fileResult.data != null) {
-        final filePath = fileResult.data!;
-
+      if (filePath != null && filePath.isNotEmpty) {
         // Send file
         final sendFileUseCase = ref.read(sendFileProvider);
         final result = await sendFileUseCase.call(SendFileParams(
-          device: state.device,
+          deviceId: device.id,
           filePath: filePath,
         ));
 
-        if (result.isSuccess) {
+        if (result) {
           // Update transfer history
           try {
             final transfer = FileTransferEntity(
               id: DateTime.now().millisecondsSinceEpoch.toString(),
               fileName: filePath.split('/').last,
               filePath: filePath,
-              deviceId: state.device.id,
-              direction: TransferDirection.sent,
-              timestamp: DateTime.now(),
+              fileSize: 0,
+              fileType: FileType.other,
+              direction: TransferDirection.send,
               status: TransferStatus.completed,
-              fileSize: 0, // You might want to get actual file size
+              progress: 1.0,
+              createdAt: DateTime.now(),
             );
 
-            final updatedTransfers = [...state.transfers, transfer];
-            state = state.copyWith(
+            final updatedTransfers = [...currentState.transfers, transfer];
+            return currentState.copyWith(
               transfers: updatedTransfers,
               successMessage: 'File sent successfully',
             );
           } catch (e) {
             // Silently fail - transfer history is not critical
+            return currentState.copyWith(
+              successMessage: 'File sent successfully',
+            );
           }
         } else {
-          state = state.copyWith(
+          return currentState.copyWith(
             errorMessage: 'Failed to send file',
           );
         }
       } else {
-        state = state.copyWith(
+        return currentState.copyWith(
           errorMessage: 'No file selected',
         );
       }
@@ -183,45 +172,56 @@ class DeviceDetailController extends StateNotifier<DeviceDetailState> {
         errorMessage = 'Device does not support file transfer.';
       }
 
-      state = state.copyWith(
+      return currentState.copyWith(
         errorMessage: errorMessage,
       );
     }
   }
 
-  Future<void> receiveFile(String fileName) async {
-    if (!state.isConnected) {
-      state = state.copyWith(
+  Future<DeviceDetailState> receiveFile(DeviceDetailState currentState, String fileName) async {
+    if (!currentState.isConnected) {
+      return currentState.copyWith(
         errorMessage: 'Device is not connected',
       );
-      return;
     }
 
     try {
       final receiveFileUseCase = ref.read(receiveFileProvider);
       final result = await receiveFileUseCase.call(ReceiveFileParams(
-        device: state.device,
+        deviceId: device.id,
         fileName: fileName,
       ));
 
-      if (result.isSuccess) {
-        state = state.copyWith(
+      if (result) {
+        return currentState.copyWith(
           successMessage: 'Started receiving file: $fileName',
         );
       } else {
-        state = state.copyWith(
+        return currentState.copyWith(
           errorMessage: 'Failed to start file receive',
         );
       }
     } catch (e) {
-      state = state.copyWith(
+      return currentState.copyWith(
         errorMessage: 'Receive file error: ${e.toString()}',
       );
     }
   }
+
+  DeviceDetailState clearMessages(DeviceDetailState currentState) {
+    return currentState.copyWith(
+      errorMessage: null,
+      successMessage: null,
+    );
+  }
 }
 
-// Provider for DeviceDetailController
-final deviceDetailControllerProvider = StateNotifierProvider.family<DeviceDetailController, DeviceDetailState, BluetoothDeviceEntity>((ref, device) {
+// Using Provider instead of StateProvider for compatibility
+final deviceDetailStateProvider = Provider.family<DeviceDetailState, BluetoothDeviceEntity>((ref, device) {
+  return DeviceDetailState(device: device);
+});
+
+// Provider for the controller
+final deviceDetailControllerProvider = Provider.family<DeviceDetailController, BluetoothDeviceEntity>((ref, device) {
   return DeviceDetailController(ref, device);
 });
