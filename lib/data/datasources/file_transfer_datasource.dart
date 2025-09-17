@@ -3,10 +3,12 @@ import 'dart:io';
 import 'dart:convert';
 import 'package:file_picker/file_picker.dart' as fp;
 import 'package:path_provider/path_provider.dart';
-import 'package:permission_handler/permission_handler.dart';
+import 'package:share_plus/share_plus.dart';
+import 'package:mime/mime.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart' as fbp;
 import '../models/file_transfer_model.dart';
 import '../../domain/entities/file_transfer_entity.dart';
+import '../../core/utils/logger.dart';
 
 abstract class FileTransferDataSource {
   Future<String?> pickFile();
@@ -19,40 +21,34 @@ abstract class FileTransferDataSource {
 }
 
 class FileTransferDataSourceImpl implements FileTransferDataSource {
-  final Map<String, StreamController<FileTransferModel>> _transferControllers = {};
+  final Map<String, StreamController<FileTransferModel>> _transferControllers =
+      {};
   final List<FileTransferModel> _transferHistory = [];
   final Map<String, fbp.BluetoothDevice> _connectedDevices = {};
 
   // OBEX File Transfer Service UUID
-  static const String _obexFileTransferServiceUuid = "00001106-0000-1000-8000-00805f9b34fb";
-  static const String _obexCharacteristicUuid = "00002a00-0000-1000-8000-00805f9b34fb";
+  static const String _obexFileTransferServiceUuid =
+      "00001106-0000-1000-8000-00805f9b34fb";
+  static const String _obexCharacteristicUuid =
+      "00002a00-0000-1000-8000-00805f9b34fb";
 
   @override
   Future<String?> pickFile() async {
     try {
-      // On macOS, we don't need storage permission like Android
-      if (Platform.isAndroid) {
-        final status = await Permission.storage.request();
-        if (!status.isGranted) {
-          throw Exception('Storage permission denied');
-        }
-      }
-
       final result = await fp.FilePicker.platform.pickFiles(
         type: fp.FileType.any,
-        allowMultiple: false,
-        allowCompression: false, // Better for macOS
+        allowMultiple: false
       );
 
       if (result != null && result.files.single.path != null) {
         final filePath = result.files.single.path!;
-        print('File picked: $filePath'); // Debug log
+        AppLogger.info('File picked: $filePath');
         return filePath;
       }
 
       return null;
-    } catch (e) {
-      print('File picker error: $e'); // Debug log
+    } catch (e, st) {
+      AppLogger.error('File picker error', error: e, stackTrace: st);
       throw Exception('Failed to pick file: $e');
     }
   }
@@ -65,7 +61,7 @@ class FileTransferDataSourceImpl implements FileTransferDataSource {
         throw Exception('File does not exist');
       }
 
-      print('Attempting to send file: $filePath to device: $deviceId');
+      AppLogger.info('Attempting to send file to device=$deviceId path=$filePath');
 
       final transferId = '${DateTime.now().millisecondsSinceEpoch}';
       final transfer = FileTransferModel.fromFile(
@@ -83,10 +79,35 @@ class FileTransferDataSourceImpl implements FileTransferDataSource {
       _transferControllers[transferId] = controller;
 
       // Attempt custom file transfer, but provide better user feedback
-      final success = await _attemptCustomFileTransfer(deviceId, file, transferId, controller);
+      final success = await _attemptCustomFileTransfer(
+        deviceId,
+        file,
+        transferId,
+        controller,
+      );
 
       if (!success) {
-        // Provide more specific error message for iPhone to MacBook transfers
+        // Fallback: On Android, try system Bluetooth share (OPP) via share sheet
+        if (Platform.isAndroid) {
+          final shared = await _trySystemBluetoothShare(file);
+          if (shared) {
+            final completedTransfer = transfer.copyWith(
+              progress: 1.0,
+              status: TransferStatus.completed,
+            );
+            final index = _transferHistory.indexWhere(
+              (t) => t.id == transferId,
+            );
+            _transferHistory[index] = completedTransfer;
+            controller.add(completedTransfer);
+            controller.close();
+            _transferControllers.remove(transferId);
+            AppLogger.info('File shared via system Bluetooth (OPP)');
+            return true;
+          }
+        }
+
+        // Otherwise, mark as failed with explicit guidance
         final failedTransfer = transfer.copyWith(
           status: TransferStatus.failed,
           progress: 0.0,
@@ -97,14 +118,15 @@ class FileTransferDataSourceImpl implements FileTransferDataSource {
         controller.close();
         _transferControllers.remove(transferId);
 
-        print('File transfer failed: MacBook does not support direct Bluetooth file transfer from iOS apps. Consider using AirDrop, email, or cloud storage instead.');
-        throw Exception('MacBook does not support direct Bluetooth file transfer. Use AirDrop or other methods.');
+        AppLogger.error('File transfer failed: Target not compatible');
+        throw Exception(
+          'Target device is not compatible with BLE file transfer over GATT. Use a companion app/service or another method.',
+        );
       }
 
       return true;
     } catch (e) {
-      print('Send file error: $e');
-      // Re-throw the exception so the UI can show the proper error message
+      AppLogger.error('Send file error', error: e);
       rethrow;
     }
   }
@@ -113,7 +135,7 @@ class FileTransferDataSourceImpl implements FileTransferDataSource {
     String deviceId,
     File file,
     String transferId,
-    StreamController<FileTransferModel> controller
+    StreamController<FileTransferModel> controller,
   ) async {
     try {
       // Get connected device
@@ -133,20 +155,47 @@ class FileTransferDataSourceImpl implements FileTransferDataSource {
 
       // Discover services to see what's available
       final services = await targetDevice.discoverServices();
-      print('Available services on device:');
+      AppLogger.debug('Available services on device:');
       for (final service in services) {
-        print('Service UUID: ${service.uuid}');
+        AppLogger.debug('Service UUID: ${service.uuid}');
         for (final characteristic in service.characteristics) {
-          print('  Characteristic UUID: ${characteristic.uuid}');
-          print('  Properties: ${characteristic.properties}');
+          AppLogger.debug('  Char UUID: ${characteristic.uuid} props=${characteristic.properties}');
         }
       }
 
-      // Look for a writable characteristic to attempt file transfer
+      // Look for a writable characteristic to attempt file transfer.
+      // Prefer custom 128-bit UUIDs and avoid reserved/standard ones (0x2A**, 0x2B**, services 0x1800/0x1801/0x180A).
       fbp.BluetoothCharacteristic? writableCharacteristic;
+
+      String norm(String uuid) => uuid.toLowerCase().replaceAll('-', '');
+      bool isCustom128(String n) => n.length == 32 && !n.startsWith('0000');
+      bool isAssignedBase(String n) =>
+          n.length == 32 &&
+          n.startsWith('0000') &&
+          n.endsWith('00001000800000805f9b34fb');
+      String shortOfBase(String n) =>
+          isAssignedBase(n) ? n.substring(4, 8) : n;
+      bool isReservedServiceN(String n) {
+        final s = shortOfBase(n);
+        return s == '1800' || s == '1801' || s == '180a';
+      }
+
+      bool isReservedCharN(String n) {
+        final s = shortOfBase(n);
+        // Any 0x2A** or 0x2B** characteristic is reserved/standard
+        return (s.length == 4) && (s.startsWith('2a') || s.startsWith('2b'));
+      }
+
+      // Pass 1: Prefer custom 128-bit services with non-reserved writable chars
       for (final service in services) {
+        final sNorm = norm(service.uuid.toString());
+        if (!isCustom128(sNorm)) continue;
         for (final characteristic in service.characteristics) {
-          if (characteristic.properties.write || characteristic.properties.writeWithoutResponse) {
+          final cNorm = norm(characteristic.uuid.toString());
+          final canWrite =
+              characteristic.properties.write ||
+              characteristic.properties.writeWithoutResponse;
+          if (canWrite && !isReservedCharN(cNorm)) {
             writableCharacteristic = characteristic;
             break;
           }
@@ -154,8 +203,27 @@ class FileTransferDataSourceImpl implements FileTransferDataSource {
         if (writableCharacteristic != null) break;
       }
 
+      // Pass 2: Any non-reserved service, non-reserved writable char
       if (writableCharacteristic == null) {
-        print('No writable characteristic found for file transfer');
+        for (final service in services) {
+          final sNorm = norm(service.uuid.toString());
+          if (isReservedServiceN(sNorm)) continue;
+          for (final characteristic in service.characteristics) {
+            final cNorm = norm(characteristic.uuid.toString());
+            final canWrite =
+                characteristic.properties.write ||
+                characteristic.properties.writeWithoutResponse;
+            if (canWrite && !isReservedCharN(cNorm)) {
+              writableCharacteristic = characteristic;
+              break;
+            }
+          }
+          if (writableCharacteristic != null) break;
+        }
+      }
+
+      if (writableCharacteristic == null) {
+        AppLogger.warn('No writable characteristic found for file transfer');
         return false;
       }
 
@@ -172,30 +240,50 @@ class FileTransferDataSourceImpl implements FileTransferDataSource {
       final metadataBytes = utf8.encode(jsonEncode(metadata));
 
       // Check if metadata fits in characteristic
-      if (metadataBytes.length > 512) { // Most characteristics have limited size
-        print('File metadata too large for Bluetooth characteristic');
+      if (metadataBytes.length > 512) {
+        AppLogger.warn('File metadata too large (${metadataBytes.length} bytes)');
         return false;
       }
 
-      // Send metadata
-      await writableCharacteristic.write(metadataBytes);
-      print('Sent file metadata to device');
+      // Send metadata using a supported write mode
+      final bool supportsWrite = writableCharacteristic.properties.write;
+      final bool supportsWriteNoResp =
+          writableCharacteristic.properties.writeWithoutResponse;
 
-      // For demonstration, show progressive transfer
+      if (!supportsWrite && !supportsWriteNoResp) {
+        AppLogger.warn('Characteristic does not support write/writeWithoutResponse');
+        return false;
+      }
+
+      await writableCharacteristic.write(
+        metadataBytes,
+        withoutResponse: supportsWrite ? false : supportsWriteNoResp,
+      );
+      AppLogger.debug('Sent file metadata to device');
+
+      // Progressive transfer. Prefer write-with-response when available.
       final fileBytes = await file.readAsBytes();
-      final chunkSize = 20; // Small chunks for Bluetooth LE
+      int chunkSize = supportsWrite ? 180 : 20;
       int totalSent = 0;
 
       for (int i = 0; i < fileBytes.length; i += chunkSize) {
-        final end = (i + chunkSize > fileBytes.length) ? fileBytes.length : i + chunkSize;
+        final end = (i + chunkSize > fileBytes.length)
+            ? fileBytes.length
+            : i + chunkSize;
         final chunk = fileBytes.sublist(i, end);
 
         try {
-          await writableCharacteristic.write(chunk, withoutResponse: true);
+          // Respect the characteristic's supported write mode
+          await writableCharacteristic.write(
+            chunk,
+            withoutResponse: !supportsWrite && supportsWriteNoResp,
+          );
           totalSent += chunk.length;
 
           // Update progress
-          final currentTransfer = _transferHistory.firstWhere((t) => t.id == transferId);
+          final currentTransfer = _transferHistory.firstWhere(
+            (t) => t.id == transferId,
+          );
           final progress = totalSent / fileBytes.length;
           final updatedTransfer = currentTransfer.copyWith(progress: progress);
           final index = _transferHistory.indexWhere((t) => t.id == transferId);
@@ -205,13 +293,35 @@ class FileTransferDataSourceImpl implements FileTransferDataSource {
           // Small delay to avoid overwhelming the connection
           await Future.delayed(const Duration(milliseconds: 50));
         } catch (e) {
-          print('Error sending chunk: $e');
-          return false;
+          AppLogger.warn('Error sending chunk', error: e);
+          // If failed due to write-without-response not supported, try with response once
+          try {
+            await writableCharacteristic.write(chunk, withoutResponse: false);
+            totalSent += chunk.length;
+
+            final currentTransfer = _transferHistory.firstWhere(
+              (t) => t.id == transferId,
+            );
+            final progress = totalSent / fileBytes.length;
+            final updatedTransfer = currentTransfer.copyWith(
+              progress: progress,
+            );
+            final index = _transferHistory.indexWhere(
+              (t) => t.id == transferId,
+            );
+            _transferHistory[index] = updatedTransfer;
+            controller.add(updatedTransfer);
+          } catch (e2) {
+            AppLogger.error('Fallback write with response failed', error: e2);
+            return false;
+          }
         }
       }
 
       // Mark as completed
-      final currentTransfer = _transferHistory.firstWhere((t) => t.id == transferId);
+      final currentTransfer = _transferHistory.firstWhere(
+        (t) => t.id == transferId,
+      );
       final completedTransfer = currentTransfer.copyWith(
         progress: 1.0,
         status: TransferStatus.completed,
@@ -222,11 +332,26 @@ class FileTransferDataSourceImpl implements FileTransferDataSource {
       controller.close();
       _transferControllers.remove(transferId);
 
-      print('File transfer completed successfully');
+      AppLogger.info('File transfer completed successfully');
       return true;
-
     } catch (e) {
-      print('Custom file transfer error: $e');
+      AppLogger.error('Custom file transfer error', error: e);
+      return false;
+    }
+  }
+
+  // Android fallback to system Bluetooth share (OPP) via share sheet
+  Future<bool> _trySystemBluetoothShare(File file) async {
+    try {
+      final mimeType = lookupMimeType(file.path) ?? 'application/octet-stream';
+      await Share.shareXFiles(
+        [XFile(file.path, mimeType: mimeType)],
+        subject: 'Send via Bluetooth',
+        text: 'Sharing file via system share',
+      );
+      return true;
+    } catch (e) {
+      AppLogger.error('System Bluetooth share failed', error: e);
       return false;
     }
   }
@@ -287,15 +412,20 @@ class FileTransferDataSourceImpl implements FileTransferDataSource {
       final file = File(filePath);
       final sink = file.openWrite();
 
-      characteristic.value.listen(
+      characteristic.lastValueStream.listen(
         (data) {
           // Write received data to file
           sink.add(data);
 
           // Update transfer progress
-          final currentTransfer = _transferHistory.firstWhere((t) => t.id == transferId);
-          final newProgress = currentTransfer.progress + (data.length / file.lengthSync());
-          final updatedTransfer = currentTransfer.copyWith(progress: newProgress);
+          final currentTransfer = _transferHistory.firstWhere(
+            (t) => t.id == transferId,
+          );
+          final newProgress =
+              currentTransfer.progress + (data.length / file.lengthSync());
+          final updatedTransfer = currentTransfer.copyWith(
+            progress: newProgress,
+          );
           final index = _transferHistory.indexWhere((t) => t.id == transferId);
           _transferHistory[index] = updatedTransfer;
           controller.add(updatedTransfer);
@@ -315,7 +445,7 @@ class FileTransferDataSourceImpl implements FileTransferDataSource {
           _transferControllers.remove(transferId);
         },
         onError: (e) {
-          print('File receive error: $e');
+          AppLogger.error('File receive stream error', error: e);
           sink.close();
           controller.close();
           _transferControllers.remove(transferId);
@@ -328,7 +458,7 @@ class FileTransferDataSourceImpl implements FileTransferDataSource {
 
       return true;
     } catch (e) {
-      print('Receive file error: $e');
+      AppLogger.error('Receive file error', error: e);
       return false;
     }
   }
@@ -352,11 +482,12 @@ class FileTransferDataSourceImpl implements FileTransferDataSource {
     final controller = _transferControllers[transferId];
     if (controller != null) {
       // Update transfer status
-      final transferIndex = _transferHistory.indexWhere((t) => t.id == transferId);
+      final transferIndex = _transferHistory.indexWhere(
+        (t) => t.id == transferId,
+      );
       if (transferIndex != -1) {
-        _transferHistory[transferIndex] = _transferHistory[transferIndex].copyWith(
-          status: TransferStatus.cancelled,
-        );
+        _transferHistory[transferIndex] = _transferHistory[transferIndex]
+            .copyWith(status: TransferStatus.cancelled);
 
         controller.add(_transferHistory[transferIndex]);
       }

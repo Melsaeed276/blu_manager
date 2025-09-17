@@ -5,11 +5,21 @@
 
     <!-- Needed right Accessories prerequisite for legacy BlueTooth -->
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <!-- Optional if you need BLE scan in background; be conservative -->
+    <!-- <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" /> -->
 
     <!-- Needed for Bluetooth scanning on Android 12 and above -->
     <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
     <!-- Needed for Bluetooth connecting on Android 12 and above -->
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+
+    <!-- File/media access. Use READ/WRITE_EXTERNAL_STORAGE only for legacy devices; on Android 13+ use READ_MEDIA_* -->
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" />
+    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
 
     <application
         android:label="blu_manager"
@@ -18,6 +28,7 @@
         <activity
             android:name=".MainActivity"
             android:exported="true"
+            android:enableOnBackInvokedCallback="true"
             android:launchMode="singleTop"
             android:taskAffinity=""
             android:theme="@style/LaunchTheme"

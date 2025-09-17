@@ -1,8 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'presentation/pages/bluetooth_devices_page.dart';
+import 'presentation/providers/permission_service.dart';
 
 void main() {
+  WidgetsFlutterBinding.ensureInitialized();
+  final permissionService = const PermissionService();
+  permissionService.requestStartupPermissions();
   runApp(const ProviderScope(child: MyApp()));
 }
 

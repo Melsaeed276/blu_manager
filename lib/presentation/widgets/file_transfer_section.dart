@@ -3,13 +3,11 @@ import '../../domain/entities/file_transfer_entity.dart';
 
 class FileTransferSection extends StatelessWidget {
   final VoidCallback onSendFile;
-  final Function(String) onReceiveFile;
   final List<FileTransferEntity> transfers;
 
   const FileTransferSection({
     super.key,
     required this.onSendFile,
-    required this.onReceiveFile,
     required this.transfers,
   });
 
@@ -33,32 +31,17 @@ class FileTransferSection extends StatelessWidget {
                   ),
                 ),
                 const SizedBox(height: 16),
-                Row(
-                  children: [
-                    Expanded(
-                      child: ElevatedButton.icon(
-                        onPressed: onSendFile,
-                        icon: const Icon(Icons.upload_file),
-                        label: const Text('Send File'),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: Colors.blue,
-                          foregroundColor: Colors.white,
-                        ),
-                      ),
+                SizedBox(
+                  width: double.infinity,
+                  child: ElevatedButton.icon(
+                    onPressed: onSendFile,
+                    icon: const Icon(Icons.upload_file),
+                    label: const Text('Send File'),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.blue,
+                      foregroundColor: Colors.white,
                     ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: ElevatedButton.icon(
-                        onPressed: () => _showReceiveFileDialog(context),
-                        icon: const Icon(Icons.download),
-                        label: const Text('Receive File'),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: Colors.green,
-                          foregroundColor: Colors.white,
-                        ),
-                      ),
-                    ),
-                  ],
+                  ),
                 ),
               ],
             ),
@@ -197,39 +180,6 @@ class FileTransferSection extends StatelessWidget {
     if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
     if (bytes < 1024 * 1024 * 1024) return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
     return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(1)} GB';
-  }
-
-  void _showReceiveFileDialog(BuildContext context) {
-    final controller = TextEditingController();
-
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Receive File'),
-        content: TextField(
-          controller: controller,
-          decoration: const InputDecoration(
-            labelText: 'File Name',
-            hintText: 'Enter the name of the file to receive',
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Cancel'),
-          ),
-          ElevatedButton(
-            onPressed: () {
-              if (controller.text.isNotEmpty) {
-                onReceiveFile(controller.text);
-                Navigator.pop(context);
-              }
-            },
-            child: const Text('Receive'),
-          ),
-        ],
-      ),
-    );
   }
 
   void _showAllTransfers(BuildContext context) {

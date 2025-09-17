@@ -4,7 +4,6 @@ import '../../domain/entities/bluetooth_device_entity.dart';
 import '../viewmodels/device_detail_viewmodel.dart';
 import '../widgets/connection_status_card.dart';
 import '../widgets/file_transfer_section.dart';
-import '../widgets/bluetooth_audio_player.dart';
 
 class DeviceDetailPage extends ConsumerStatefulWidget {
   final BluetoothDeviceEntity device;
@@ -16,124 +15,82 @@ class DeviceDetailPage extends ConsumerStatefulWidget {
 }
 
 class _DeviceDetailPageState extends ConsumerState<DeviceDetailPage> {
-  DeviceDetailState? currentState;
-
   @override
   void initState() {
     super.initState();
-    // Initialize state
-    currentState = DeviceDetailState(device: widget.device);
-
-    // Auto-connect when page loads
+    // Initialize device and auto-connect when page loads
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      _connectToDevice();
+      ref.read(deviceDetailNotifierProvider.notifier).setDevice(widget.device);
+      //ref.read(deviceDetailNotifierProvider.notifier).connectToDevice();
     });
+  }
+
+  void _showErrorDialog(String message) async {
+    if (!mounted) return;
+    await showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Error'),
+        content: Text(message),
+        actions: [
+          TextButton(
+            onPressed: () {
+              Navigator.of(ctx).pop();
+            },
+            child: const Text('OK'),
+          ),
+        ],
+      ),
+    );
+    if (mounted) {
+      ref.read(deviceDetailNotifierProvider.notifier).clearMessages();
+    }
   }
 
   Future<void> _connectToDevice() async {
-    if (currentState == null) return;
-
-    final controller = ref.read(deviceDetailControllerProvider(widget.device));
-    final newState = await controller.connectToDevice(currentState!);
-    setState(() {
-      currentState = newState;
-    });
-
-    _handleStateMessages(newState);
+    ref.read(deviceDetailNotifierProvider.notifier).connectToDevice();
   }
 
   Future<void> _disconnectFromDevice() async {
-    if (currentState == null) return;
-
-    final controller = ref.read(deviceDetailControllerProvider(widget.device));
-    final newState = await controller.disconnectFromDevice(currentState!);
-    setState(() {
-      currentState = newState;
-    });
-
-    _handleStateMessages(newState);
+    ref.read(deviceDetailNotifierProvider.notifier).disconnectFromDevice();
   }
 
   Future<void> _sendFile() async {
-    if (currentState == null) return;
-
-    final controller = ref.read(deviceDetailControllerProvider(widget.device));
-    final newState = await controller.sendFile(currentState!);
-    setState(() {
-      currentState = newState;
-    });
-
-    _handleStateMessages(newState);
-  }
-
-  Future<void> _receiveFile(String fileName) async {
-    if (currentState == null) return;
-
-    final controller = ref.read(deviceDetailControllerProvider(widget.device));
-    final newState = await controller.receiveFile(currentState!, fileName);
-    setState(() {
-      currentState = newState;
-    });
-
-    _handleStateMessages(newState);
-  }
-
-  void _handleStateMessages(DeviceDetailState state) {
-    if (state.errorMessage != null) {
-      _showErrorMessage(state.errorMessage!);
-      _clearMessages();
-    }
-    if (state.successMessage != null) {
-      _showSuccessMessage(state.successMessage!);
-      _clearMessages();
-    }
-  }
-
-  void _clearMessages() {
-    if (currentState == null) return;
-
-    final controller = ref.read(deviceDetailControllerProvider(widget.device));
-    final newState = controller.clearMessages(currentState!);
-    setState(() {
-      currentState = newState;
-    });
-  }
-
-  void _showErrorMessage(String message) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(message),
-        backgroundColor: Colors.red,
-        duration: const Duration(seconds: 3),
-      ),
-    );
-  }
-
-  void _showSuccessMessage(String message) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(message),
-        backgroundColor: Colors.green,
-        duration: const Duration(seconds: 2),
-      ),
-    );
+    ref.read(deviceDetailNotifierProvider.notifier).sendFile();
   }
 
   @override
   Widget build(BuildContext context) {
-    if (currentState == null) {
-      return const Scaffold(
-        body: Center(
-          child: CircularProgressIndicator(),
-        ),
-      );
-    }
+    // Listen for messages (must be inside build per Riverpod rules)
+    ref.listen<DeviceDetailState>(deviceDetailNotifierProvider, (previous, next) {
+      if (!mounted) return;
+      if (next.errorMessage != null && next.errorMessage != previous?.errorMessage) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) _showErrorDialog(next.errorMessage!);
+        });
+      } else if (next.successMessage != null && next.successMessage != previous?.successMessage) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted) return;
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text(next.successMessage!)),
+          );
+          ref.read(deviceDetailNotifierProvider.notifier).clearMessages();
+        });
+      }
+    });
 
-    final state = currentState!;
+    final state = ref.watch(deviceDetailNotifierProvider);
+
+    // Show loading while device is being initialized
+    if (state.device.id.isEmpty) {
+      return const Scaffold(body: Center(child: CircularProgressIndicator()));
+    }
 
     return Scaffold(
       appBar: AppBar(
-        title: Text(widget.device.name.isNotEmpty ? widget.device.name : 'Unknown Device'),
+        title: Text(
+          widget.device.name.isNotEmpty ? widget.device.name : 'Unknown Device',
+        ),
         backgroundColor: Theme.of(context).primaryColor,
       ),
       body: Padding(
@@ -141,31 +98,20 @@ class _DeviceDetailPageState extends ConsumerState<DeviceDetailPage> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            // Connection Status Card
             ConnectionStatusCard(
               connectionState: state.connectionState,
               isConnecting: state.isConnecting,
               onConnect: _connectToDevice,
               onDisconnect: _disconnectFromDevice,
             ),
-            
             const SizedBox(height: 16),
-            
-            // File Transfer Section
             if (state.isConnected) ...[
               FileTransferSection(
                 onSendFile: _sendFile,
-                onReceiveFile: _receiveFile,
                 transfers: state.transfers,
               ),
-              
               const SizedBox(height: 16),
-              
-              // Bluetooth Audio Player (if device supports audio)
-              BluetoothAudioPlayer(device: widget.device),
             ],
-            
-            // Device Info
             Card(
               child: Padding(
                 padding: const EdgeInsets.all(16.0),
@@ -177,9 +123,13 @@ class _DeviceDetailPageState extends ConsumerState<DeviceDetailPage> {
                       style: Theme.of(context).textTheme.titleMedium,
                     ),
                     const SizedBox(height: 8),
-                    Text('Name: ${widget.device.name.isNotEmpty ? widget.device.name : 'Unknown'}'),
+                    Text(
+                      'Name: ${widget.device.name.isNotEmpty ? widget.device.name : 'Unknown'}',
+                    ),
                     Text('ID: ${widget.device.id}'),
-                    Text('Type: ${widget.device.deviceType.toString().split('.').last}'),
+                    Text(
+                      'Type: ${widget.device.deviceType.toString().split('.').last}',
+                    ),
                     Text('RSSI: ${widget.device.rssi} dBm'),
                   ],
                 ),

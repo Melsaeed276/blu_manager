@@ -5,6 +5,7 @@ class BluetoothDeviceModel extends BluetoothDeviceEntity {
   const BluetoothDeviceModel({
     required super.id,
     required super.name,
+    required super.rawName,
     required super.rssi,
     required super.isConnected,
     required super.connectionState,
@@ -12,49 +13,56 @@ class BluetoothDeviceModel extends BluetoothDeviceEntity {
   });
 
   factory BluetoothDeviceModel.fromScanResult(fbp.ScanResult scanResult) {
-    // Enhanced name handling for macOS with better fallbacks
-    String deviceName = scanResult.device.platformName;
-    // Try advertisement name if platform name is empty
-    if (deviceName.isEmpty) {
-      deviceName = scanResult.advertisementData.advName;
+    // Capture original raw advertised/platform name first
+    String rawName = scanResult.device.platformName;
+    if (rawName.isEmpty) {
+      rawName = scanResult.advertisementData.advName;
     }
 
-    // Enhanced device type detection
-    final deviceType = _detectDeviceType(scanResult);
+    var deviceType = _detectDeviceType(scanResult);
 
-    // If still no name, create a meaningful fallback based on device type
-    if (deviceName.isEmpty) {
+    // Display name logic
+    String displayName = rawName; // start with raw
+
+    // If type unknown -> ignore provided name and generate placeholder later
+    if (deviceType == BluetoothDeviceType.unknown) {
+      displayName = '';
+    }
+
+    if (displayName.isEmpty) {
       final deviceId = scanResult.device.remoteId.toString();
+      final suffix = deviceId.length >= 4 ? deviceId.substring(deviceId.length - 4) : deviceId;
       switch (deviceType) {
         case BluetoothDeviceType.speaker:
-          deviceName = 'Bluetooth Speaker (${deviceId.substring(deviceId.length - 4)})';
+          displayName = 'Bluetooth Speaker ($suffix)';
           break;
         case BluetoothDeviceType.headphones:
-          deviceName = 'Bluetooth Headphones (${deviceId.substring(deviceId.length - 4)})';
+          displayName = 'Bluetooth Headphones ($suffix)';
           break;
         case BluetoothDeviceType.earbuds:
-          deviceName = 'Bluetooth Earbuds (${deviceId.substring(deviceId.length - 4)})';
+          displayName = 'Bluetooth Earbuds ($suffix)';
           break;
         case BluetoothDeviceType.phone:
-          deviceName = 'Mobile Device (${deviceId.substring(deviceId.length - 4)})';
+          displayName = 'Mobile Device ($suffix)';
           break;
         case BluetoothDeviceType.computer:
-          deviceName = 'Computer (${deviceId.substring(deviceId.length - 4)})';
+          displayName = 'Computer ($suffix)';
           break;
         case BluetoothDeviceType.mouse:
-          deviceName = 'Bluetooth Mouse (${deviceId.substring(deviceId.length - 4)})';
+          displayName = 'Bluetooth Mouse ($suffix)';
           break;
         case BluetoothDeviceType.keyboard:
-          deviceName = 'Bluetooth Keyboard (${deviceId.substring(deviceId.length - 4)})';
+          displayName = 'Bluetooth Keyboard ($suffix)';
           break;
         default:
-          deviceName = 'Bluetooth Device (${deviceId.substring(deviceId.length - 4)})';
+          displayName = 'Bluetooth Device ($suffix)';
       }
     }
 
     return BluetoothDeviceModel(
       id: scanResult.device.remoteId.toString(),
-      name: deviceName,
+      name: displayName,
+      rawName: rawName,
       rssi: scanResult.rssi,
       isConnected: false,
       connectionState: BluetoothConnectionState.disconnected,
@@ -69,9 +77,17 @@ class BluetoothDeviceModel extends BluetoothDeviceEntity {
     BluetoothConnectionState connectionState = BluetoothConnectionState.disconnected,
     BluetoothDeviceType deviceType = BluetoothDeviceType.unknown,
   }) {
+    final rawName = device.platformName;
+    String displayName = rawName.isEmpty && deviceType != BluetoothDeviceType.unknown
+        ? 'Bluetooth Device'
+        : rawName;
+    if (deviceType == BluetoothDeviceType.unknown) {
+      displayName = rawName.isEmpty ? 'Bluetooth Device' : 'Bluetooth Device'; // force placeholder style
+    }
     return BluetoothDeviceModel(
       id: device.remoteId.toString(),
-      name: device.platformName.isEmpty ? 'Unknown Device' : device.platformName,
+      name: displayName,
+      rawName: rawName,
       rssi: rssi,
       isConnected: isConnected,
       connectionState: connectionState,
@@ -83,6 +99,7 @@ class BluetoothDeviceModel extends BluetoothDeviceEntity {
   BluetoothDeviceModel copyWith({
     String? id,
     String? name,
+    String? rawName,
     int? rssi,
     bool? isConnected,
     BluetoothConnectionState? connectionState,
@@ -91,6 +108,7 @@ class BluetoothDeviceModel extends BluetoothDeviceEntity {
     return BluetoothDeviceModel(
       id: id ?? this.id,
       name: name ?? this.name,
+      rawName: rawName ?? this.rawName,
       rssi: rssi ?? this.rssi,
       isConnected: isConnected ?? this.isConnected,
       connectionState: connectionState ?? this.connectionState,

@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart' as fbp;
 import '../models/bluetooth_device_model.dart';
 import '../../domain/entities/bluetooth_device_entity.dart';
+import '../../core/utils/logger.dart';
 
 abstract class BluetoothDataSource {
   Future<bool> isBluetoothEnabled();
@@ -57,11 +58,11 @@ class BluetoothDataSourceImpl implements BluetoothDataSource {
       // Start scanning with macOS-optimized settings
       await fbp.FlutterBluePlus.startScan(
         timeout: const Duration(seconds: 30), // Longer timeout for macOS
-        androidUsesFineLocation: false,
+        androidUsesFineLocation: true,
         // Scan for all services to catch more devices
-        withServices: [],
-          // macOS-specific: Allow duplicates to catch name updates
-       // allowDuplicates: Platform.isMacOS,
+        //withServices: [],
+        // macOS-specific: Allow duplicates to catch name updates
+        // allowDuplicates: Platform.isMacOS,
       );
 
       // Listen to scan results with enhanced processing
@@ -75,7 +76,6 @@ class BluetoothDataSourceImpl implements BluetoothDataSource {
           _refreshConnectedDevices();
         });
       }
-
     } catch (e) {
       throw Exception('Failed to start scan: $e');
     }
@@ -106,12 +106,15 @@ class BluetoothDataSourceImpl implements BluetoothDataSource {
       await device.connect(timeout: const Duration(seconds: 15));
 
       // Update the device in our current results
-      final deviceIndex = _currentScanResults.indexWhere((d) => d.id == deviceId);
+      final deviceIndex = _currentScanResults.indexWhere(
+        (d) => d.id == deviceId,
+      );
       if (deviceIndex >= 0) {
-        _currentScanResults[deviceIndex] = _currentScanResults[deviceIndex].copyWith(
-          isConnected: true,
-          connectionState: BluetoothConnectionState.connected,
-        );
+        _currentScanResults[deviceIndex] = _currentScanResults[deviceIndex]
+            .copyWith(
+              isConnected: true,
+              connectionState: BluetoothConnectionState.connected,
+            );
         _scanResultsController.add(_currentScanResults);
       }
 
@@ -129,12 +132,15 @@ class BluetoothDataSourceImpl implements BluetoothDataSource {
         await device.disconnect();
 
         // Update the device in our current results
-        final deviceIndex = _currentScanResults.indexWhere((d) => d.id == deviceId);
+        final deviceIndex = _currentScanResults.indexWhere(
+          (d) => d.id == deviceId,
+        );
         if (deviceIndex >= 0) {
-          _currentScanResults[deviceIndex] = _currentScanResults[deviceIndex].copyWith(
-            isConnected: false,
-            connectionState: BluetoothConnectionState.disconnected,
-          );
+          _currentScanResults[deviceIndex] = _currentScanResults[deviceIndex]
+              .copyWith(
+                isConnected: false,
+                connectionState: BluetoothConnectionState.disconnected,
+              );
           _scanResultsController.add(_currentScanResults);
         }
       }
@@ -150,15 +156,18 @@ class BluetoothDataSourceImpl implements BluetoothDataSource {
       return Stream.value(BluetoothConnectionState.disconnected);
     }
 
-    return device.connectionState.map((state) =>
-        BluetoothDeviceModel.mapConnectionState(state));
+    return device.connectionState.map(
+      (state) => BluetoothDeviceModel.mapConnectionState(state),
+    );
   }
 
   @override
   Future<List<String>> getConnectedDevices() async {
     try {
       final connectedDevices = fbp.FlutterBluePlus.connectedDevices;
-      return connectedDevices.map((device) => device.remoteId.toString()).toList();
+      return connectedDevices
+          .map((device) => device.remoteId.toString())
+          .toList();
     } catch (e) {
       return [];
     }
@@ -166,53 +175,54 @@ class BluetoothDataSourceImpl implements BluetoothDataSource {
 
   // Enhanced scan result processing
   void _processScanResults(List<fbp.ScanResult> results) {
-    final Map<String, BluetoothDeviceModel> devices = {};
+    final Map<String, BluetoothDeviceModel> merged = {
+      for (final existing in _currentScanResults) existing.id: existing,
+    };
 
-    // First, preserve existing devices to maintain any manually updated names
-    for (final existingDevice in _currentScanResults) {
-      devices[existingDevice.id] = existingDevice;
-    }
-
-    // Process new scan results
     for (final result in results) {
-      final deviceModel = BluetoothDeviceModel.fromScanResult(result);
-      final existingDevice = devices[deviceModel.id];
+      var fresh = BluetoothDeviceModel.fromScanResult(result);
+      final existing = merged[fresh.id];
 
-      // Update device info, but preserve better names if we have them
-      if (existingDevice != null) {
-        // Keep the better name (longer, more descriptive one)
-        final betterName = _getBetterName(existingDevice.name, deviceModel.name);
-        devices[deviceModel.id] = existingDevice.copyWith(
-          name: betterName,
-          rssi: deviceModel.rssi,
-          deviceType: deviceModel.deviceType != BluetoothDeviceType.unknown
-              ? deviceModel.deviceType
-              : existingDevice.deviceType,
+      if (existing != null) {
+        final keepExistingName = existing.name.trim().isNotEmpty &&
+            (fresh.name.trim().isEmpty || existing.name != existing.id);
+        final newName = keepExistingName ? existing.name : fresh.name;
+
+        final refinedType = (existing.deviceType == BluetoothDeviceType.unknown &&
+                fresh.deviceType != BluetoothDeviceType.unknown)
+            ? fresh.deviceType
+            : existing.deviceType;
+
+        final newRawName = existing.rawName.isEmpty && fresh.rawName.isNotEmpty
+            ? fresh.rawName
+            : existing.rawName;
+
+        fresh = existing.copyWith(
+          name: newName,
+          rssi: fresh.rssi,
+          deviceType: refinedType,
+          rawName: newRawName,
         );
-      } else {
-        devices[deviceModel.id] = deviceModel;
       }
 
-      // Cache the device for later use
-      _cachedDevices[deviceModel.id] = result.device;
+      // Do not reclassify unknown; keep placeholder logic handled in model.
+      merged[fresh.id] = fresh;
+      _cachedDevices[fresh.id] = result.device; // cache
     }
 
-    _currentScanResults = devices.values.toList();
-    // Sort by signal strength and device type relevance
+    _currentScanResults = merged.values.toList();
+
     _currentScanResults.sort((a, b) {
-      // Prioritize audio devices (speakers, headphones) for better UX
-      final aIsAudio = _isAudioDevice(a.deviceType);
-      final bIsAudio = _isAudioDevice(b.deviceType);
-
-      if (aIsAudio && !bIsAudio) return -1;
-      if (!aIsAudio && bIsAudio) return 1;
-
-      // Then sort by signal strength
+      final aAudio = _isAudioDevice(a.deviceType);
+      final bAudio = _isAudioDevice(b.deviceType);
+      if (aAudio && !bAudio) return -1;
+      if (!aAudio && bAudio) return 1;
       return b.rssi.compareTo(a.rssi);
     });
 
     _scanResultsController.add(_currentScanResults);
   }
+
 
   // Add already connected devices to improve discovery on macOS
   Future<void> _addConnectedDevices() async {
@@ -221,9 +231,14 @@ class BluetoothDataSourceImpl implements BluetoothDataSource {
 
       for (final device in connectedDevices) {
         // Try to get additional device info for connected devices
-        final deviceModel = await _createEnhancedDeviceModel(device, isConnected: true);
+        final deviceModel = await _createEnhancedDeviceModel(
+          device,
+          isConnected: true,
+        );
 
-        final existingIndex = _currentScanResults.indexWhere((d) => d.id == deviceModel.id);
+        final existingIndex = _currentScanResults.indexWhere(
+          (d) => d.id == deviceModel.id,
+        );
         if (existingIndex >= 0) {
           _currentScanResults[existingIndex] = deviceModel;
         } else {
@@ -234,8 +249,8 @@ class BluetoothDataSourceImpl implements BluetoothDataSource {
       }
 
       _scanResultsController.add(_currentScanResults);
-    } catch (e) {
-      print('Error adding connected devices: $e');
+    } catch (e, st) {
+      AppLogger.error('Error adding connected devices', error: e, stackTrace: st);
     }
   }
 
@@ -246,12 +261,11 @@ class BluetoothDataSourceImpl implements BluetoothDataSource {
     int rssi = 0,
   }) async {
     String deviceName = device.platformName;
+    final originalRaw = deviceName; // preserve raw platform name
     BluetoothDeviceType deviceType = BluetoothDeviceType.unknown;
 
-    // For connected devices, try to get more info
     if (isConnected) {
       try {
-        // Try to discover services to better determine device type
         final services = await device.discoverServices().timeout(
           const Duration(seconds: 5),
           onTimeout: () => <fbp.BluetoothService>[],
@@ -259,35 +273,25 @@ class BluetoothDataSourceImpl implements BluetoothDataSource {
 
         deviceType = _detectDeviceTypeFromServices(services, deviceName);
 
-        // Try to get device name from Generic Access service
         if (deviceName.isEmpty) {
           deviceName = await _tryGetDeviceNameFromServices(services) ?? deviceName;
         }
-      } catch (e) {
-        print('Error discovering device info: $e');
+      } catch (e, st) {
+        AppLogger.warn('Error discovering device info for connected device ${device.remoteId}', error: e, stackTrace: st);
       }
     }
 
-    // Fallback name if still empty
+    if (deviceType == BluetoothDeviceType.unknown) {
+      deviceName = ''; // force placeholder downstream consistency
+    }
     if (deviceName.isEmpty) {
-      switch (deviceType) {
-        case BluetoothDeviceType.speaker:
-          deviceName = 'Bluetooth Speaker';
-          break;
-        case BluetoothDeviceType.headphones:
-          deviceName = 'Bluetooth Headphones';
-          break;
-        case BluetoothDeviceType.earbuds:
-          deviceName = 'Bluetooth Earbuds';
-          break;
-        default:
-          deviceName = 'Bluetooth Device';
-      }
+      deviceName = 'Bluetooth Device';
     }
 
     return BluetoothDeviceModel(
       id: device.remoteId.toString(),
       name: deviceName,
+      rawName: originalRaw,
       rssi: rssi,
       isConnected: isConnected,
       connectionState: isConnected
@@ -308,15 +312,19 @@ class BluetoothDataSourceImpl implements BluetoothDataSource {
       final serviceUuid = service.serviceUuid.toString().toLowerCase();
 
       // Audio services
-      if (serviceUuid.contains('110b') || serviceUuid.contains('110a') ||
-          serviceUuid.contains('110d') || serviceUuid.contains('111e') ||
+      if (serviceUuid.contains('110b') ||
+          serviceUuid.contains('110a') ||
+          serviceUuid.contains('110d') ||
+          serviceUuid.contains('111e') ||
           serviceUuid.contains('1108')) {
-
-        if (deviceNameLower.contains('speaker') || deviceNameLower.contains('boom')) {
+        if (deviceNameLower.contains('speaker') ||
+            deviceNameLower.contains('boom')) {
           return BluetoothDeviceType.speaker;
-        } else if (deviceNameLower.contains('airpods') || deviceNameLower.contains('earbuds')) {
+        } else if (deviceNameLower.contains('airpods') ||
+            deviceNameLower.contains('earbuds')) {
           return BluetoothDeviceType.earbuds;
-        } else if (deviceNameLower.contains('headphones') || deviceNameLower.contains('headset')) {
+        } else if (deviceNameLower.contains('headphones') ||
+            deviceNameLower.contains('headset')) {
           return BluetoothDeviceType.headphones;
         } else {
           return BluetoothDeviceType.speaker; // Default for audio devices
@@ -326,7 +334,9 @@ class BluetoothDataSourceImpl implements BluetoothDataSource {
       // HID service
       if (serviceUuid.contains('1812')) {
         if (deviceNameLower.contains('mouse')) return BluetoothDeviceType.mouse;
-        if (deviceNameLower.contains('keyboard')) return BluetoothDeviceType.keyboard;
+        if (deviceNameLower.contains('keyboard')) {
+          return BluetoothDeviceType.keyboard;
+        }
         return BluetoothDeviceType.mouse; // Default for HID
       }
     }
@@ -335,26 +345,34 @@ class BluetoothDataSourceImpl implements BluetoothDataSource {
   }
 
   // Try to get device name from Generic Access Service
-  Future<String?> _tryGetDeviceNameFromServices(List<fbp.BluetoothService> services) async {
+  Future<String?> _tryGetDeviceNameFromServices(
+    List<fbp.BluetoothService> services,
+  ) async {
     try {
       // Look for Generic Access Service (0x1800)
-      final gasService = services.where((s) =>
-          s.serviceUuid.toString().toLowerCase().contains('1800')).firstOrNull;
+      final gasService = services
+          .where((s) => s.serviceUuid.toString().toLowerCase().contains('1800'))
+          .firstOrNull;
 
       if (gasService != null) {
         final characteristics = gasService.characteristics; // Remove await here
 
         // Look for Device Name characteristic (0x2A00)
-        final nameCharacteristic = characteristics.where((c) =>
-            c.characteristicUuid.toString().toLowerCase().contains('2a00')).firstOrNull;
+        final nameCharacteristic = characteristics
+            .where(
+              (c) => c.characteristicUuid.toString().toLowerCase().contains(
+                '2a00',
+              ),
+            )
+            .firstOrNull;
 
         if (nameCharacteristic != null) {
           final value = await nameCharacteristic.read();
           return String.fromCharCodes(value);
         }
       }
-    } catch (e) {
-      print('Error reading device name from services: $e');
+    } catch (e, st) {
+      AppLogger.warn('Error reading device name from services', error: e, stackTrace: st);
     }
     return null;
   }
@@ -363,30 +381,16 @@ class BluetoothDataSourceImpl implements BluetoothDataSource {
   Future<void> _refreshConnectedDevices() async {
     try {
       await _addConnectedDevices();
-    } catch (e) {
-      print('Error refreshing connected devices: $e');
+    } catch (e, st) {
+      AppLogger.warn('Error refreshing connected devices', error: e, stackTrace: st);
     }
-  }
-
-  // Helper to determine better name between two options
-  String _getBetterName(String name1, String name2) {
-    if (name1.isEmpty) return name2;
-    if (name2.isEmpty) return name1;
-
-    // Prefer non-generic names
-    if (name1.contains('Bluetooth Device') && !name2.contains('Bluetooth Device')) return name2;
-    if (name2.contains('Bluetooth Device') && !name1.contains('Bluetooth Device')) return name1;
-
-    // Prefer longer, more descriptive names
-    if (name2.length > name1.length && !name2.contains('(')) return name2;
-    return name1;
   }
 
   // Helper to check if device type is audio-related
   bool _isAudioDevice(BluetoothDeviceType type) {
     return type == BluetoothDeviceType.speaker ||
-           type == BluetoothDeviceType.headphones ||
-           type == BluetoothDeviceType.earbuds;
+        type == BluetoothDeviceType.headphones ||
+        type == BluetoothDeviceType.earbuds;
   }
 
   void dispose() {
